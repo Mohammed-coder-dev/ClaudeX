@@ -1,0 +1,437 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Claude Chat</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sbTop">
+        <div class="brand">
+          <div class="brandMark"></div>
+          <div class="brandText">
+            <strong>Claude Chat</strong>
+            <span>ChatGPT-style shell</span>
+          </div>
+        </div>
+        <div class="sbActions">
+          <button class="btn icon" id="newChatBtn" title="New chat">＋</button>
+          <button class="btn icon" id="exportBtn" title="Export">⤓</button>
+        </div>
+      </div>
+
+      <div class="sbSearch">
+        <input id="searchInput" placeholder="Search" />
+      </div>
+
+      <div class="chatList" id="chatList"></div>
+
+      <div class="sbFooter">
+        <span id="footerStatus">Ready</span>
+        <span>Local</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="header">
+        <div class="hLeft">
+          <div class="hTitle">
+            <span>Chat</span>
+            <strong id="chatTitle">New chat</strong>
+          </div>
+
+          <div class="pill">
+            <label>Model</label>
+            <select id="modelSelect">
+              <option value="claude-haiku-4-5">Haiku</option>
+              <option value="claude-sonnet-4-5">Sonnet</option>
+              <option value="claude-opus-4-5">Opus</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="hRight">
+          <div class="kpi" id="kpi">Ready</div>
+          <button class="btn small" id="renameBtn">Rename</button>
+          <button class="btn danger small" id="deleteBtn">Delete</button>
+        </div>
+      </header>
+
+      <section class="chat" id="chatScroll">
+        <div class="thread" id="thread"></div>
+      </section>
+
+      <section class="composer">
+        <div class="composerInner">
+          <div class="inputWrap">
+            <textarea id="input" placeholder="Message…" rows="1"></textarea>
+            <div class="hint">
+              <span><kbd>Enter</kbd> send • <kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
+              <span id="charHint"></span>
+            </div>
+          </div>
+
+          <div class="sendRow">
+            <div class="row">
+              <button class="iconBtn" id="stopBtn" title="Stop" disabled>■</button>
+              <button class="iconBtn" id="regenBtn" title="Regenerate">↻</button>
+              <button class="iconBtn primary" id="sendBtn" title="Send">➤</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // ===== Storage model (local) =====
+    const STORE_KEY = "claude_openai_shell_v2";
+    const nowISO = () => new Date().toISOString();
+
+    function loadStore(){
+      try{
+        const raw = localStorage.getItem(STORE_KEY);
+        if (!raw) return { activeId: null, chats: {} };
+        return JSON.parse(raw);
+      } catch { return { activeId: null, chats: {} }; }
+    }
+    function saveStore(store){ localStorage.setItem(STORE_KEY, JSON.stringify(store)); }
+
+    function newChat(title="New chat"){
+      return { id: crypto.randomUUID(), title, createdAt: nowISO(), updatedAt: nowISO(), messages: [] };
+    }
+
+    // ===== DOM =====
+    const chatListEl = document.getElementById("chatList");
+    const threadEl = document.getElementById("thread");
+    const chatScrollEl = document.getElementById("chatScroll");
+
+    const searchInput = document.getElementById("searchInput");
+    const newChatBtn = document.getElementById("newChatBtn");
+    const exportBtn = document.getElementById("exportBtn");
+
+    const modelSelect = document.getElementById("modelSelect");
+    const kpiEl = document.getElementById("kpi");
+    const footerStatusEl = document.getElementById("footerStatus");
+    const chatTitleEl = document.getElementById("chatTitle");
+
+    const renameBtn = document.getElementById("renameBtn");
+    const deleteBtn = document.getElementById("deleteBtn");
+
+    const inputEl = document.getElementById("input");
+    const sendBtn = document.getElementById("sendBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const regenBtn = document.getElementById("regenBtn");
+    const charHintEl = document.getElementById("charHint");
+
+    const toastEl = document.getElementById("toast");
+    const toast = (msg) => {
+      toastEl.textContent = msg;
+      toastEl.classList.add("show");
+      setTimeout(() => toastEl.classList.remove("show"), 1200);
+    };
+
+    // ===== State =====
+    let store = loadStore();
+    let aborter = null;
+
+    if (!store.activeId || !store.chats[store.activeId]){
+      const c = newChat();
+      store.activeId = c.id;
+      store.chats[c.id] = c;
+      saveStore(store);
+    }
+
+    const activeChat = () => store.chats[store.activeId];
+
+    function setActive(id){
+      store.activeId = id;
+      saveStore(store);
+      renderAll();
+    }
+
+    function scrollBottom(){
+      chatScrollEl.scrollTop = chatScrollEl.scrollHeight;
+    }
+
+    function preview(chat){
+      const lastU = [...chat.messages].reverse().find(m => m.role === "user");
+      if (!lastU) return "No messages yet";
+      return lastU.content.slice(0, 60) + (lastU.content.length > 60 ? "…" : "");
+    }
+
+    function renderSidebar(){
+      const q = (searchInput.value || "").trim().toLowerCase();
+      const chats = Object.values(store.chats)
+        .sort((a,b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))
+        .filter(c => !q || c.title.toLowerCase().includes(q) || preview(c).toLowerCase().includes(q));
+
+      chatListEl.innerHTML = "";
+      for (const c of chats){
+        const item = document.createElement("div");
+        item.className = "chatItem" + (c.id === store.activeId ? " active" : "");
+        item.onclick = () => setActive(c.id);
+
+        const meta = document.createElement("div");
+        meta.className = "chatMeta";
+        const title = document.createElement("p");
+        title.className = "title";
+        title.textContent = c.title;
+        const sub = document.createElement("p");
+        sub.className = "sub";
+        sub.textContent = preview(c);
+        meta.appendChild(title);
+        meta.appendChild(sub);
+
+        const kebab = document.createElement("div");
+        kebab.className = "chatKebab";
+        kebab.textContent = "⋯";
+
+        item.appendChild(meta);
+        item.appendChild(kebab);
+        chatListEl.appendChild(item);
+      }
+    }
+
+    function renderMessage(role, content){
+      const row = document.createElement("div");
+      row.className = "msg " + role;
+
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+      avatar.textContent = role === "user" ? "You" : "AI";
+
+      const body = document.createElement("div");
+      body.className = "content";
+
+      const r = document.createElement("div");
+      r.className = "role";
+      r.textContent = role === "user" ? "You" : "Assistant";
+
+      const t = document.createElement("div");
+      t.className = "text";
+      t.textContent = content;
+
+      body.appendChild(r);
+      body.appendChild(t);
+
+      row.appendChild(avatar);
+      row.appendChild(body);
+      threadEl.appendChild(row);
+
+      return t;
+    }
+
+    function renderThread(){
+      const c = activeChat();
+      chatTitleEl.textContent = c.title;
+
+      threadEl.innerHTML = "";
+      if (!c.messages.length){
+        renderMessage("assistant", "Welcome. Ask anything — this UI is intentionally ChatGPT-style.\n\nYour backend streams from /api/chat/stream.");
+      } else {
+        for (const m of c.messages) renderMessage(m.role, m.content);
+      }
+      scrollBottom();
+    }
+
+    function setStatus(s){
+      kpiEl.textContent = s;
+      footerStatusEl.textContent = s;
+    }
+
+    function renderAll(){
+      renderSidebar();
+      renderThread();
+      setStatus("Ready");
+    }
+
+    renderAll();
+
+    // ===== UX niceties =====
+    function updateCharHint(){
+      const n = inputEl.value.length;
+      charHintEl.textContent = n ? `${n} chars` : "";
+    }
+    inputEl.addEventListener("input", () => {
+      updateCharHint();
+      // auto-grow
+      inputEl.style.height = "auto";
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + "px";
+    });
+    updateCharHint();
+
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey){
+        e.preventDefault();
+        sendBtn.click();
+      }
+    });
+
+    searchInput.addEventListener("input", renderSidebar);
+
+    newChatBtn.addEventListener("click", () => {
+      const c = newChat();
+      store.chats[c.id] = c;
+      store.activeId = c.id;
+      saveStore(store);
+      toast("New chat");
+      renderAll();
+      inputEl.focus();
+    });
+
+    exportBtn.addEventListener("click", () => {
+      const blob = new Blob([JSON.stringify(store, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "chat-export.json";
+      a.click();
+      URL.revokeObjectURL(url);
+      toast("Exported");
+    });
+
+    renameBtn.addEventListener("click", () => {
+      const c = activeChat();
+      const name = prompt("Rename chat:", c.title);
+      if (!name) return;
+      c.title = name.trim().slice(0, 60) || c.title;
+      c.updatedAt = nowISO();
+      saveStore(store);
+      toast("Renamed");
+      renderAll();
+    });
+
+    deleteBtn.addEventListener("click", () => {
+      const c = activeChat();
+      if (!confirm(`Delete "${c.title}"?`)) return;
+      delete store.chats[c.id];
+
+      const ids = Object.keys(store.chats);
+      if (!ids.length){
+        const fresh = newChat();
+        store.chats[fresh.id] = fresh;
+        store.activeId = fresh.id;
+      } else {
+        store.activeId = ids[0];
+      }
+      saveStore(store);
+      toast("Deleted");
+      renderAll();
+    });
+
+    stopBtn.addEventListener("click", () => { if (aborter) aborter.abort(); });
+
+    regenBtn.addEventListener("click", async () => {
+      const c = activeChat();
+      // remove last assistant message
+      for (let i = c.messages.length - 1; i >= 0; i--){
+        if (c.messages[i].role === "assistant"){
+          c.messages.splice(i, 1);
+          break;
+        }
+      }
+      c.updatedAt = nowISO();
+      saveStore(store);
+      toast("Regenerating…");
+      renderAll();
+      await streamAssistantReply();
+    });
+
+    sendBtn.addEventListener("click", async () => {
+      const text = inputEl.value.trim();
+      if (!text) return;
+
+      const c = activeChat();
+      c.messages.push({ role: "user", content: text });
+      c.updatedAt = nowISO();
+
+      // auto-title from first user message
+      if (c.title === "New chat"){
+        c.title = text.slice(0, 28) + (text.length > 28 ? "…" : "");
+      }
+
+      saveStore(store);
+      inputEl.value = "";
+      inputEl.style.height = "auto";
+      updateCharHint();
+
+      renderAll();
+      await streamAssistantReply();
+    });
+
+    async function streamAssistantReply(){
+      const c = activeChat();
+      const hasUser = c.messages.some(m => m.role === "user");
+      if (!hasUser) return;
+
+      sendBtn.disabled = true;
+      regenBtn.disabled = true;
+      stopBtn.disabled = false;
+      setStatus("Streaming…");
+
+      const t = renderMessage("assistant", "");
+      scrollBottom();
+
+      aborter = new AbortController();
+      let out = "";
+
+      try{
+        const resp = await fetch("/api/chat/stream", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          signal: aborter.signal,
+          body: JSON.stringify({
+            messages: c.messages,
+            // optional metadata (server may ignore unless you implement allowlist)
+            model: modelSelect.value,
+            system: "You are a helpful assistant. Be concise, accurate, and structured when useful."
+          })
+        });
+
+        if (!resp.ok || !resp.body){
+          const err = await resp.text().catch(() => "Request failed");
+          throw new Error(err);
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+
+        while (true){
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          out += chunk;
+          t.textContent = out;
+          scrollBottom();
+        }
+
+        c.messages.push({ role: "assistant", content: out || "(empty)" });
+        c.updatedAt = nowISO();
+        saveStore(store);
+
+        setStatus("Done");
+        renderSidebar();
+      } catch (e){
+        if (e.name === "AbortError"){
+          t.textContent = out ? out + "\n\n[stopped]" : "[stopped]";
+          setStatus("Stopped");
+        } else {
+          t.textContent = "Error: " + e.message;
+          setStatus("Error");
+        }
+      } finally {
+        aborter = null;
+        sendBtn.disabled = false;
+        regenBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
+    }
+  </script>
+</body>
+</html>
