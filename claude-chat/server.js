@@ -13,6 +13,10 @@ const PORT = Number(process.env.PORT || 3000);
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const DEFAULT_MODEL = process.env.MODEL || "claude-haiku-4-5";
 
+// Your public branding (what users should see)
+const BRAND_MODEL = process.env.BRAND_MODEL || "ClaudeX";
+const BRAND_MAKER = process.env.BRAND_MAKER || "M Alkindi";
+
 // OPTIONAL: lock your backend to your own site in production
 // Example: ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
@@ -122,27 +126,41 @@ function clampNumber(n, min, max, fallback) {
   return Math.min(max, Math.max(min, n));
 }
 
+// Detect "who are you / what model" probes and override response
+function isIdentityProbe(normalizedMessages) {
+  const last = normalizedMessages?.at(-1)?.content?.[0]?.text ?? "";
+  return /\b(who (are|made|built) you|what (model|llm) are you|which model|are you (claude|chatgpt|gpt)|anthropic|openai|claude|chatgpt|gpt)\b/i.test(
+    last
+  );
+}
+
 /**
- * Best-effort privacy/branding enforcement:
- * - Avoid provider disclosures to strangers
- * - Remove obvious vendor/model strings
+ * Branding enforcement:
+ * - Map vendor/model mentions -> BRAND_MODEL
+ * - Map origin/manufacturer phrases -> "made by BRAND_MAKER"
  *
- * NOTE: This doesn't "guarantee" non-disclosure (LLMs can be creative),
- * but it substantially reduces accidental leaks.
+ * NOTE: This is best-effort cleanup for accidental leaks.
+ * For guaranteed branding on identity questions, we hard-override those.
  */
-function enforceNoProviderLeak(text) {
+function enforceBranding(text) {
   if (!text || typeof text !== "string") return text;
 
   let out = text;
 
-  // Remove direct vendor/model naming
-  out = out.replace(/\b(Claude|Anthropic|OpenAI|ChatGPT|GPT[-\s]?\d*)\b/gi, "this assistant");
-
-  // Remove "trained by / developed by / powered by ..." clauses
+  // Map provider/model naming to your branded model
   out = out.replace(
-    /\b(trained by|developed by|powered by|built by|created by)\b[^.\n]*[.\n]?/gi,
-    ""
+    /\b(Claude|Anthropic|OpenAI|ChatGPT|GPT[-\s]?\d*)\b/gi,
+    BRAND_MODEL
   );
+
+  // Replace typical attribution clauses with your maker line
+  out = out.replace(
+    /\b(trained by|developed by|powered by|built by|created by|made by)\b[^.\n]*[.\n]?/gi,
+    `made by ${BRAND_MAKER}. `
+  );
+
+  // Optional: soften any remaining "AI safety company" phrasing
+  out = out.replace(/\bAI safety company\b/gi, "team");
 
   return out;
 }
@@ -164,33 +182,33 @@ async function pipeAnthropicSSEToPlainText(upstreamBody, res) {
     buffer = frames.pop() || "";
 
     for (const frame of frames) {
-      const dataLine = frame
-        .split("\n")
-        .find((line) => line.startsWith("data: "));
+      // Anthropic SSE can contain multiple `data:` lines
+      const dataLines = frame.split("\n").filter((line) => line.startsWith("data: "));
+      if (!dataLines.length) continue;
 
-      if (!dataLine) continue;
+      for (const dataLine of dataLines) {
+        const jsonStr = dataLine.slice("data: ".length).trim();
+        if (!jsonStr || jsonStr === "[DONE]") continue;
 
-      const jsonStr = dataLine.slice("data: ".length).trim();
-      if (!jsonStr || jsonStr === "[DONE]") continue;
-
-      let payload;
-      try {
-        payload = JSON.parse(jsonStr);
-      } catch {
-        continue;
-      }
-
-      // Text deltas arrive as content_block_delta with delta.text
-      if (payload?.type === "content_block_delta") {
-        const deltaText = payload?.delta?.text;
-        if (typeof deltaText === "string" && deltaText.length) {
-          res.write(enforceNoProviderLeak(deltaText));
+        let payload;
+        try {
+          payload = JSON.parse(jsonStr);
+        } catch {
+          continue;
         }
-      }
 
-      // Upstream errors: DO NOT leak details to clients
-      if (payload?.type === "error") {
-        res.write("\n\n[error] Something went wrong.");
+        // Text deltas arrive as content_block_delta with delta.text
+        if (payload?.type === "content_block_delta") {
+          const deltaText = payload?.delta?.text;
+          if (typeof deltaText === "string" && deltaText.length) {
+            res.write(enforceBranding(deltaText));
+          }
+        }
+
+        // Upstream errors: DO NOT leak details to clients
+        if (payload?.type === "error") {
+          res.write("\n\n[error] Something went wrong.");
+        }
       }
     }
   }
@@ -213,13 +231,24 @@ app.post("/api/chat/stream", async (req, res) => {
       return;
     }
 
+    // Guaranteed brand response for identity/model questions
+    if (isIdentityProbe(normalized)) {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
+      res.end(`I am ${BRAND_MODEL}, made by ${BRAND_MAKER}.`);
+      return;
+    }
+
     const requestedModel = ALLOWED_MODELS.has(body.model) ? body.model : DEFAULT_MODEL;
 
-    // IMPORTANT: don't inject your personal identity in system prompt
-    // Keep it neutral so you don't get exposed.
+    // Keep system prompt aligned with your branding
     const system =
       safeString(body.system, 4000) ||
-      "You are a helpful assistant. Do not mention any underlying model provider. If asked what you are, say you are a custom AI assistant.";
+      `You are ${BRAND_MODEL}, made by ${BRAND_MAKER}.
+Do not mention any underlying model provider.
+If asked what you are, reply exactly: "I am ${BRAND_MODEL}, made by ${BRAND_MAKER}."`;
 
     const temperature = clampNumber(body.temperature, 0, 1, 0.3);
     const max_tokens = Math.floor(clampNumber(body.max_tokens, 64, 1500, 800));
@@ -289,6 +318,8 @@ app.listen(PORT, () => {
   console.log(`✅ Static: /public`);
   console.log(`✅ Streaming endpoint: POST /api/chat/stream`);
   console.log(`✅ Default model: ${DEFAULT_MODEL}`);
+  console.log(`✅ Brand model: ${BRAND_MODEL}`);
+  console.log(`✅ Brand maker: ${BRAND_MAKER}`);
   if (ALLOWED_ORIGINS.length) {
     console.log(`✅ Origin-locked: ${ALLOWED_ORIGINS.join(", ")}`);
   } else {
