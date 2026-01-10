@@ -7,3 +7,8 @@
 .env
 **/.env
 .env.*
+
+# Secrets
+.env
+**/.env
+.env.*
