@@ -8,6 +8,9 @@ dotenv.config();
 
 const app = express();
 
+// Trust proxy for rate limiting
+app.set("trust proxy", 1);
+
 // ===== Config =====
 const PORT = Number(process.env.PORT || 3000);
 const API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -38,7 +41,7 @@ if (!API_KEY) {
 // ===== Middleware =====
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static("public", { extensions: ["html"] }));
+app.use(express.static(new URL(".", import.meta.url).pathname, { extensions: ["html"] }));
 
 app.use(
   helmet({
@@ -53,6 +56,7 @@ app.use(
     max: 45, // per IP per minute
     standardHeaders: true,
     legacyHeaders: false,
+    skip: (req) => !req.ip, // skip if no IP
   })
 );
 
@@ -319,15 +323,15 @@ const isMainModule = import.meta.url === `file://${process.argv[1]}`;
 if (isMainModule) {
   app.listen(PORT, () => {
     console.log(`✅ Server running: http://localhost:${PORT}`);
-    console.log(`✅ Static: /public`);
-    console.log(`✅ Streaming endpoint: POST /api/chat/stream`);
+    console.log("✅ Static: serving from root directory");
+    console.log("✅ Streaming endpoint: POST /api/chat/stream");
     console.log(`✅ Default model: ${DEFAULT_MODEL}`);
     console.log(`✅ Brand model: ${BRAND_MODEL}`);
     console.log(`✅ Brand maker: ${BRAND_MAKER}`);
     if (ALLOWED_ORIGINS.length) {
       console.log(`✅ Origin-locked: ${ALLOWED_ORIGINS.join(", ")}`);
     } else {
-      console.log(`⚠️ Origin lock disabled (set ALLOWED_ORIGINS in .env for prod)`);
+      console.log("⚠️ Origin lock disabled (set ALLOWED_ORIGINS in .env for prod)");
     }
   });
 }
